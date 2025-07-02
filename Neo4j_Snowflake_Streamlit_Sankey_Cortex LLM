@@ -1,108 +1,360 @@
 import streamlit as st
 import snowflake.snowpark as snowpark
 import plotly.graph_objects as go
+import plotly.express as px
+import networkx as nx
+import pandas as pd
+import numpy as np
 
-session = snowpark.Session.builder.getOrCreate()
-st.title("✅ Neo4j ➜ Snowflake ➜ Streamlit Sankey + Cortex LLM")
+# Page configuration
+st.set_page_config(
+    page_title="Neo4j → Snowflake → Streamlit",
+    page_icon="🔗",
+    layout="wide"
+)
 
-df = session.table("snowflake_learning_db.public.neo4j_graph").to_pandas()
-st.dataframe(df)
+# Initialize Snowflake session
+@st.cache_resource
+def init_snowflake_session():
+    return snowpark.Session.builder.getOrCreate()
 
-# Sankey chart code same as before
-sources = df['SOURCE'].tolist()
-targets = df['TARGET'].tolist()
-labels = list(set(sources + targets))
-source_idx = [labels.index(s) for s in sources]
-target_idx = [labels.index(t) for t in targets]
+session = init_snowflake_session()
 
-fig = go.Figure(data=[go.Sankey(
-    node=dict(label=labels),
-    link=dict(source=source_idx, target=target_idx, value=[1]*len(source_idx))
-)])
-st.plotly_chart(fig)
+# Main title
+st.title("🔗 Neo4j ➜ Snowflake ➜ Streamlit Network Graph + Cortex LLM")
+st.markdown("---")
 
-# Try with correct Cortex model names
+# Load data
+@st.cache_data
+def load_graph_data():
+    df = session.table("snowflake_learning_db.public.neo4j_graph").to_pandas()
+    return df
+
 try:
-    # Option 1: Try mistral-7b (most common)
-    response_df = session.sql("""
-    SELECT SNOWFLAKE.CORTEX.COMPLETE(
-        'mistral-7b',
-        'Give me personalized treatment recommendations for patients in the graph'
-    ) AS response
-    """).to_pandas()
+    df = load_graph_data()
     
-    response = response_df['RESPONSE'][0]
-    st.subheader("Cortex LLM Response")
-    st.write(response)
+    # Display raw data in expandable section
+    with st.expander("📋 Raw Graph Data", expanded=False):
+        st.dataframe(df, use_container_width=True)
     
-except Exception as e1:
-    try:
-        # Option 2: Try llama2-70b-chat
-        response_df = session.sql("""
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            'llama2-70b-chat',
-            'Give me personalized treatment recommendations for patients in the graph'
-        ) AS response
-        """).to_pandas()
+    # Create two columns for layout
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("🕸️ Interactive Network Graph")
         
-        response = response_df['RESPONSE'][0]
-        st.subheader("Cortex LLM Response")
-        st.write(response)
+        # Create NetworkX graph
+        G = nx.Graph()
         
-    except Exception as e2:
+        # Add edges with relationships
+        for _, row in df.iterrows():
+            relationship = row.get('RELATIONSHIP', 'CONNECTED')
+            G.add_edge(row['SOURCE'], row['TARGET'], relationship=relationship)
+        
+        # Get node positions using spring layout
+        pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
+        
+        # Node type classification function
+        def get_node_type(node):
+            node_str = str(node).upper()
+            if any(keyword in node_str for keyword in ['RAJESH', 'SHARIQ', 'MAYUR', 'PATIENT']):
+                return 'Patient'
+            elif any(keyword in node_str for keyword in ['DR.', 'DOCTOR', 'SHARMA']):
+                return 'Doctor'
+            elif any(keyword in node_str for keyword in ['DIABETES', 'HYPERTENSION', 'HEALTHSECURE', 'MEDICOV']):
+                return 'Condition/Insurance'
+            elif any(keyword in node_str for keyword in ['HAS_RISK', 'TREATED_BY', 'HAS_INSURANCE']):
+                return 'Relationship'
+            else:
+                return 'Other'
+        
+        # Group nodes by type
+        node_types = {}
+        for node in G.nodes():
+            node_type = get_node_type(node)
+            if node_type not in node_types:
+                node_types[node_type] = {'nodes': [], 'x': [], 'y': []}
+            node_types[node_type]['nodes'].append(node)
+            node_types[node_type]['x'].append(pos[node][0])
+            node_types[node_type]['y'].append(pos[node][1])
+        
+        # Color scheme for different node types
+        colors = {
+            'Patient': '#FF6B6B',        # Red
+            'Doctor': '#4ECDC4',         # Teal
+            'Condition/Insurance': '#45B7D1',  # Blue
+            'Relationship': '#FFA07A',   # Light Salmon
+            'Other': '#96CEB4'           # Green
+        }
+        
+        # Create edge traces
+        edge_x = []
+        edge_y = []
+        edge_info = []
+        
+        for edge in G.edges(data=True):
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+            
+            # Store edge info for hover
+            relationship = edge[2].get('relationship', 'connected')
+            edge_info.append(f"{edge[0]} → {edge[1]}<br>Relationship: {relationship}")
+        
+        # Create the plot
+        fig = go.Figure()
+        
+        # Add edges
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=2, color='rgba(136,136,136,0.6)'),
+            hoverinfo='none',
+            mode='lines',
+            name='Connections',
+            showlegend=False
+        ))
+        
+        # Add nodes by type
+        for node_type, data in node_types.items():
+            # Calculate node sizes based on connections (MUCH BIGGER)
+            node_sizes = []
+            for node in data['nodes']:
+                degree = G.degree(node)
+                size = max(50, min(80, 40 + degree * 8))  # Size between 50-80 based on connections
+                node_sizes.append(size)
+            
+            fig.add_trace(go.Scatter(
+                x=data['x'], y=data['y'],
+                mode='markers+text',
+                marker=dict(
+                    size=node_sizes,
+                    color=colors.get(node_type, '#888'),
+                    line=dict(width=2, color='white'),
+                    opacity=0.8
+                ),
+                text=data['nodes'],
+                textposition="middle center",
+                textfont=dict(size=12, color='white', family='Arial Black'),
+                hoverinfo='text',
+                hovertext=[f"<b>{node}</b><br>Type: {node_type}<br>Connections: {G.degree(node)}" 
+                          for node in data['nodes']],
+                name=f"{node_type} ({len(data['nodes'])})"
+            ))
+        
+        # Add relationship labels on edges
+        for _, row in df.iterrows():
+            if row['SOURCE'] in pos and row['TARGET'] in pos:
+                source_pos = pos[row['SOURCE']]
+                target_pos = pos[row['TARGET']]
+                mid_x = (source_pos[0] + target_pos[0]) / 2
+                mid_y = (source_pos[1] + target_pos[1]) / 2
+                
+                relationship = row.get('RELATIONSHIP', '')
+                if relationship:
+                    fig.add_annotation(
+                        x=mid_x, y=mid_y,
+                        text=relationship,
+                        showarrow=False,
+                        font=dict(size=8, color='#666'),
+                        bgcolor='rgba(255,255,255,0.8)',
+                        bordercolor='#ccc',
+                        borderwidth=1
+                    )
+        
+        # Update layout
+        fig.update_layout(
+            title={
+                'text': "Healthcare Network Graph",
+                'x': 0.5,
+                'xanchor': 'center',
+                'font': {'size': 18}
+            },
+            showlegend=True,
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02
+            ),
+            hovermode='closest',
+            margin=dict(b=20, l=5, r=5, t=60),
+            annotations=[
+                dict(
+                    text="💡 Hover over nodes for details • Node size = number of connections",
+                    showarrow=False,
+                    xref="paper", yref="paper",
+                    x=0.5, y=-0.05,
+                    xanchor='center', yanchor='top',
+                    font=dict(color='gray', size=10)
+                )
+            ],
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            plot_bgcolor='white',
+            height=600
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.subheader("📊 Graph Analytics")
+        
+        # Graph metrics
+        st.metric("Total Nodes", len(G.nodes()))
+        st.metric("Total Edges", len(G.edges()))
+        st.metric("Graph Density", f"{nx.density(G):.3f}")
+        st.metric("Connected Components", nx.number_connected_components(G))
+        
+        # Node type distribution
+        st.subheader("🎯 Node Distribution")
+        for node_type, data in node_types.items():
+            st.write(f"**{node_type}**: {len(data['nodes'])}")
+        
+        # Most connected nodes
+        st.subheader("🔗 Most Connected")
+        degrees = dict(G.degree())
+        top_nodes = sorted(degrees.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        for node, degree in top_nodes:
+            st.write(f"• **{node}**: {degree} connections")
+    
+    # Full width section for detailed analysis
+    st.markdown("---")
+    st.subheader("🔍 Detailed Node Analysis")
+    
+    # Create tabs for different node types
+    tabs = st.tabs([f"{node_type} ({len(data['nodes'])})" for node_type, data in node_types.items()])
+    
+    for i, (node_type, data) in enumerate(node_types.items()):
+        with tabs[i]:
+            st.write(f"**{node_type} Nodes:**")
+            
+            # Create a DataFrame for this node type
+            node_details = []
+            for node in data['nodes']:
+                connections = list(G.neighbors(node))
+                node_details.append({
+                    'Node': node,
+                    'Connections': len(connections),
+                    'Connected To': ', '.join(connections) if connections else 'None'
+                })
+            
+            node_df = pd.DataFrame(node_details)
+            st.dataframe(node_df, use_container_width=True, hide_index=True)
+    
+    # Cortex LLM Analysis
+    st.markdown("---")
+    st.subheader("🤖 AI-Powered Graph Analysis")
+    
+    # Create detailed graph summary for LLM
+    graph_summary = f"""
+Healthcare Network Analysis:
+- Total Nodes: {len(G.nodes())}
+- Total Relationships: {len(G.edges())}
+- Network Density: {nx.density(G):.3f}
+
+Node Types Distribution:
+"""
+    
+    for node_type, data in node_types.items():
+        graph_summary += f"- {node_type}: {len(data['nodes'])} nodes\n"
+    
+    graph_summary += "\nKey Relationships:\n"
+    for _, row in df.iterrows():
+        relationship = row.get('RELATIONSHIP', 'connected')
+        graph_summary += f"- {row['SOURCE']} --[{relationship}]--> {row['TARGET']}\n"
+    
+    # Most connected nodes
+    graph_summary += f"\nMost Connected Nodes:\n"
+    for node, degree in top_nodes[:3]:
+        graph_summary += f"- {node}: {degree} connections\n"
+    
+    # Cortex LLM call with error handling
+    with st.spinner("🧠 Analyzing graph with Cortex AI..."):
         try:
-            # Option 3: Try mixtral-8x7b
-            response_df = session.sql("""
+            response_df = session.sql(f"""
             SELECT SNOWFLAKE.CORTEX.COMPLETE(
-                'mixtral-8x7b',
-                'Give me personalized treatment recommendations for patients in the graph'
+                'mistral-7b',
+                'As a healthcare data analyst, please analyze this network graph and provide insights:
+                
+                {graph_summary}
+                
+                Please provide:
+                1. Key insights about the healthcare network structure
+                2. Potential care coordination opportunities
+                3. Risk factors and recommendations
+                4. Network optimization suggestions
+                
+                Keep the response detailed but concise.'
             ) AS response
             """).to_pandas()
             
             response = response_df['RESPONSE'][0]
-            st.subheader("Cortex LLM Response")
-            st.write(response)
             
-        except Exception as e3:
-            try:
-                # Option 4: Try gemma-7b
-                response_df = session.sql("""
-                SELECT SNOWFLAKE.CORTEX.COMPLETE(
-                    'gemma-7b',
-                    'Give me personalized treatment recommendations for patients in the graph'
-                ) AS response
-                """).to_pandas()
-                
-                response = response_df['RESPONSE'][0]
-                st.subheader("Cortex LLM Response")
-                st.write(response)
-                
-            except Exception as e4:
-                # If all fail, show available models and errors
-                st.subheader("Cortex LLM Response")
-                st.error("Unable to find working model. Common Snowflake Cortex models:")
-                st.write("**Available Models (try these in Snowflake directly):**")
-                st.code("""
--- Test these models individually:
-SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-7b', 'Hello');
-SELECT SNOWFLAKE.CORTEX.COMPLETE('llama2-70b-chat', 'Hello');  
-SELECT SNOWFLAKE.CORTEX.COMPLETE('mixtral-8x7b', 'Hello');
-SELECT SNOWFLAKE.CORTEX.COMPLETE('gemma-7b', 'Hello');
-SELECT SNOWFLAKE.CORTEX.COMPLETE('reka-core', 'Hello');
-SELECT SNOWFLAKE.CORTEX.COMPLETE('reka-flash', 'Hello');
-                """)
-                
-                st.write("**Errors encountered:**")
-                st.write(f"mistral-7b: {str(e1)}")
-                st.write(f"llama2-70b-chat: {str(e2)}")
-                st.write(f"mixtral-8x7b: {str(e3)}")
-                st.write(f"gemma-7b: {str(e4)}")
+            # Display the response in a nice format
+            st.markdown("### 💡 AI Insights:")
+            st.markdown(response)
+            
+        except Exception as e:
+            st.error(f"❌ Cortex LLM Error: {str(e)}")
+            
+            # Fallback analysis
+            st.markdown("### 📈 Fallback Analysis:")
+            st.info(f"""
+            **Network Overview:**
+            - This healthcare network contains {len(G.nodes())} entities with {len(G.edges())} relationships
+            - Network density: {nx.density(G):.3f} (higher = more interconnected)
+            - Most connected entity: {top_nodes[0][0]} with {top_nodes[0][1]} connections
+            
+            **Key Observations:**
+            - Patients: {len(node_types.get('Patient', {'nodes': []})['nodes'])} identified
+            - Healthcare providers: {len(node_types.get('Doctor', {'nodes': []})['nodes'])} identified
+            - Conditions/Insurance: {len(node_types.get('Condition/Insurance', {'nodes': []})['nodes'])} identified
+            """)
+    
+    # Additional features
+    st.markdown("---")
+    st.subheader("🛠️ Additional Features")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
+    
+    with col2:
+        if st.button("📊 Export Graph Data"):
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="Download CSV",
+                data=csv,
+                file_name="network_graph_data.csv",
+                mime="text/csv"
+            )
+    
+    with col3:
+        if st.button("📈 Generate Report"):
+            st.success("Report feature coming soon!")
 
-# Alternative: Show graph analysis without LLM
-st.subheader("Graph Analysis (Alternative)")
-st.write(f"Total nodes: {len(labels)}")
-st.write(f"Total connections: {len(sources)}")
-st.write("Top sources:")
-source_counts = df['SOURCE'].value_counts().head(5)
-for source, count in source_counts.items():
-    st.write(f"- {source}: {count} connections")
+except Exception as e:
+    st.error(f"❌ Error loading data: {str(e)}")
+    st.info("""
+    **Troubleshooting Steps:**
+    1. Ensure Snowflake connection is active
+    2. Verify table `snowflake_learning_db.public.neo4j_graph` exists
+    3. Check if your role has proper permissions
+    4. Validate the table has SOURCE, TARGET, and RELATIONSHIP columns
+    """)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: gray; font-size: 12px;'>
+    🔗 Neo4j → ❄️ Snowflake → 🎈 Streamlit → 🤖 Cortex AI Pipeline
+    <br>
+    Built with ❤️ for healthcare data visualization
+</div>
+""", unsafe_allow_html=True)
