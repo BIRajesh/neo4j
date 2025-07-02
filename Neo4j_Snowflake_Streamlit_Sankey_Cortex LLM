@@ -1,0 +1,108 @@
+import streamlit as st
+import snowflake.snowpark as snowpark
+import plotly.graph_objects as go
+
+session = snowpark.Session.builder.getOrCreate()
+st.title("✅ Neo4j ➜ Snowflake ➜ Streamlit Sankey + Cortex LLM")
+
+df = session.table("snowflake_learning_db.public.neo4j_graph").to_pandas()
+st.dataframe(df)
+
+# Sankey chart code same as before
+sources = df['SOURCE'].tolist()
+targets = df['TARGET'].tolist()
+labels = list(set(sources + targets))
+source_idx = [labels.index(s) for s in sources]
+target_idx = [labels.index(t) for t in targets]
+
+fig = go.Figure(data=[go.Sankey(
+    node=dict(label=labels),
+    link=dict(source=source_idx, target=target_idx, value=[1]*len(source_idx))
+)])
+st.plotly_chart(fig)
+
+# Try with correct Cortex model names
+try:
+    # Option 1: Try mistral-7b (most common)
+    response_df = session.sql("""
+    SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'mistral-7b',
+        'Give me personalized treatment recommendations for patients in the graph'
+    ) AS response
+    """).to_pandas()
+    
+    response = response_df['RESPONSE'][0]
+    st.subheader("Cortex LLM Response")
+    st.write(response)
+    
+except Exception as e1:
+    try:
+        # Option 2: Try llama2-70b-chat
+        response_df = session.sql("""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            'llama2-70b-chat',
+            'Give me personalized treatment recommendations for patients in the graph'
+        ) AS response
+        """).to_pandas()
+        
+        response = response_df['RESPONSE'][0]
+        st.subheader("Cortex LLM Response")
+        st.write(response)
+        
+    except Exception as e2:
+        try:
+            # Option 3: Try mixtral-8x7b
+            response_df = session.sql("""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                'mixtral-8x7b',
+                'Give me personalized treatment recommendations for patients in the graph'
+            ) AS response
+            """).to_pandas()
+            
+            response = response_df['RESPONSE'][0]
+            st.subheader("Cortex LLM Response")
+            st.write(response)
+            
+        except Exception as e3:
+            try:
+                # Option 4: Try gemma-7b
+                response_df = session.sql("""
+                SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                    'gemma-7b',
+                    'Give me personalized treatment recommendations for patients in the graph'
+                ) AS response
+                """).to_pandas()
+                
+                response = response_df['RESPONSE'][0]
+                st.subheader("Cortex LLM Response")
+                st.write(response)
+                
+            except Exception as e4:
+                # If all fail, show available models and errors
+                st.subheader("Cortex LLM Response")
+                st.error("Unable to find working model. Common Snowflake Cortex models:")
+                st.write("**Available Models (try these in Snowflake directly):**")
+                st.code("""
+-- Test these models individually:
+SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-7b', 'Hello');
+SELECT SNOWFLAKE.CORTEX.COMPLETE('llama2-70b-chat', 'Hello');  
+SELECT SNOWFLAKE.CORTEX.COMPLETE('mixtral-8x7b', 'Hello');
+SELECT SNOWFLAKE.CORTEX.COMPLETE('gemma-7b', 'Hello');
+SELECT SNOWFLAKE.CORTEX.COMPLETE('reka-core', 'Hello');
+SELECT SNOWFLAKE.CORTEX.COMPLETE('reka-flash', 'Hello');
+                """)
+                
+                st.write("**Errors encountered:**")
+                st.write(f"mistral-7b: {str(e1)}")
+                st.write(f"llama2-70b-chat: {str(e2)}")
+                st.write(f"mixtral-8x7b: {str(e3)}")
+                st.write(f"gemma-7b: {str(e4)}")
+
+# Alternative: Show graph analysis without LLM
+st.subheader("Graph Analysis (Alternative)")
+st.write(f"Total nodes: {len(labels)}")
+st.write(f"Total connections: {len(sources)}")
+st.write("Top sources:")
+source_counts = df['SOURCE'].value_counts().head(5)
+for source, count in source_counts.items():
+    st.write(f"- {source}: {count} connections")
